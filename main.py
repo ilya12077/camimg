@@ -5,6 +5,7 @@ from dotenv import find_dotenv, load_dotenv
 from flask import Flask, request
 from flask import Response
 from waitress import serve
+from functools import wraps
 
 load_dotenv(find_dotenv())
 app = Flask(__name__)
@@ -35,7 +36,32 @@ def fetch_image_cached(image_name):
     return response.content, response.headers.get('content-type', 'image/jpeg')
 
 
+def log_request(f):
+    @wraps(f)  # Это важно для Flask!
+    def wrapper(*args, **kwargs):
+        # Выполняем запрос
+        response = f(*args, **kwargs)
+        # Получаем статус-код
+        if isinstance(response, tuple):
+            # Если вернули (body, status)
+            status_code = response[1] if len(response) > 1 else 200
+        elif hasattr(response, 'status_code'):
+            # Если вернули Response объект
+            status_code = response.status_code
+        else:
+            status_code = 200
+        # Логируем после выполнения
+        method = request.method
+        path = request.full_path
+        protocol = request.environ.get('SERVER_PROTOCOL', 'HTTP/1.1')
+        print(f'{status_code} "{method} {path} {protocol}" -')
+        return response
+
+    return wrapper
+
+
 @app.route('/camimg')
+@log_request
 def proxy_image():
     passw = request.args.get('pass')
     image_name = request.args.get('img')

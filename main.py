@@ -69,7 +69,7 @@ def fetch_image_cached(image_name):
         verify=True
     )
     response.raise_for_status()
-    compressed = compress_and_resize_bytes(response.content, max_width=640, max_height=480, quality=65)
+    compressed = compress_and_resize_bytes(response.content, max_width=800, max_height=600, quality=65)
 
     return compressed, response.headers.get('content-type', 'image/jpeg')
 

@@ -7,13 +7,63 @@ from flask import Response
 from waitress import serve
 from PIL import Image
 import io
+from concurrent.futures import ThreadPoolExecutor, as_completed
 
 load_dotenv(find_dotenv())
 app = Flask(__name__)
+executor = ThreadPoolExecutor(max_workers=50)
 
 AUTH_TOKEN = os.environ.get('AUTH_TOKEN')
 PASSWORD = os.environ.get('PASSWORD')
 EXTERNAL_SERVER = os.environ.get('EXTERNAL_SERVER')
+
+session = requests.Session()
+session.headers.update({
+    "Authorization": f"Bearer {AUTH_TOKEN}",
+    "User-Agent": "CamImgProxy/1.0"
+})
+
+
+def make_gif(image_names, duration=150):
+    futures = [executor.submit(fetch_image_cached, name) for name in image_names]
+
+    frames = []
+
+    for future in futures:
+        try:
+            image = future.result()
+
+            image = compress_and_resize_bytes(
+                image,
+                max_width=640,
+                max_height=480,
+                quality=65
+            )
+
+            frames.append(Image.open(io.BytesIO(image)))
+
+        except requests.exceptions.HTTPError as e:
+            if e.response is not None and e.response.status_code == 404:
+                continue
+            raise
+
+    if not frames:
+        raise FileNotFoundError("No frames found")
+
+    output = io.BytesIO()
+
+    frames[0].save(
+        output,
+        format="GIF",
+        save_all=True,
+        append_images=frames[1:],
+        duration=duration,
+        loop=0,
+        optimize=False,
+    )
+
+    output.seek(0)
+    return output.getvalue()
 
 
 def compress_and_resize_bytes(image_bytes, max_width=800, max_height=600, quality=65):
@@ -52,26 +102,20 @@ def compress_and_resize_bytes(image_bytes, max_width=800, max_height=600, qualit
     return output_buffer.getvalue()
 
 
-@lru_cache(maxsize=20)  # Кэш на 100 изображений
+@lru_cache(maxsize=256)  # Кэш на 100 изображений
 def fetch_image_cached(image_name):
     """Получение изображения с кэшированием"""
     external_url = f"{EXTERNAL_SERVER}/{image_name}"
 
-    headers = {
-        'Authorization': f"Bearer {AUTH_TOKEN}",
-        'User-Agent': 'Python-Proxy-Server'
-    }
-
-    response = requests.get(
+    response = session.get(
         external_url,
-        headers=headers,
-        timeout=3,
+        timeout=(3, 5),
         verify=True
     )
     response.raise_for_status()
-    compressed = compress_and_resize_bytes(response.content, max_width=800, max_height=600, quality=65)
+    # compressed = compress_and_resize_bytes(response.content, max_width=800, max_height=600, quality=65)
 
-    return compressed, response.headers.get('content-type', 'image/jpeg')
+    return response.content
 
 
 @app.route('/camimg')
@@ -91,11 +135,11 @@ def proxy_image():
             return "Invalid image format", 400
 
         # Получаем изображение (из кэша или загружаем)
-        content, content_type = fetch_image_cached(image_name)
-
+        content = fetch_image_cached(image_name)
+        content = compress_and_resize_bytes(content, max_width=800, max_height=600, quality=65)
         return Response(
             content,
-            content_type=content_type,
+            content_type="image/jpeg",
             status=200
         )
 
@@ -112,6 +156,49 @@ def clear_cache():
     """Очистка кэша (опционально)"""
     fetch_image_cached.cache_clear()
     return "Cache cleared", 200
+
+
+@app.route('/camgif')
+def proxy_gif():
+    passw = request.args.get('pass')
+    image_name = request.args.get('img')
+
+    if not passw or not image_name:
+        return "Missing parameters", 400
+
+    if passw != PASSWORD:
+        return "Unauthorized", 401
+
+    try:
+        if not image_name.lower().endswith(('.jpg', '.jpeg', '.png')):
+            return "Invalid image format", 400
+
+        # Разделяем путь и имя файла
+        folder, filename = image_name.rsplit('/', 1)
+
+        # Отрезаем "_5.jpg"
+        prefix = filename.rsplit('_', 1)[0]
+
+        # Формируем список кадров _0 ... _10
+        image_names = [
+            f"{folder}/{prefix}_{i}.jpg"
+            for i in range(30)
+        ]
+
+        gif = make_gif(image_names)
+
+        return Response(
+            gif,
+            content_type='image/gif',
+            status=200
+        )
+
+    except requests.exceptions.HTTPError as e:
+        if e.response.status_code == 404:
+            return "Image not found", 404
+        return f"HTTP Error: {str(e)}", e.response.status_code
+    except Exception as e:
+        return f"Internal error: {str(e)}", 500
 
 
 if __name__ == '__main__':

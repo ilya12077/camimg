@@ -35,8 +35,8 @@ def make_gif(image_names, duration=150):
 
             image = compress_and_resize_bytes(
                 image,
-                max_width=640,
-                max_height=480,
+                max_width=320,
+                max_height=240,
                 quality=65
             )
 

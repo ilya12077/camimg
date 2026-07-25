@@ -1,21 +1,38 @@
 FROM python:3.11-slim
 
-RUN apt-get update && apt-get upgrade -y && apt-get install -y emacs &&\
-    apt-get autoremove -y
-	
-# Install software 
-RUN apt-get install -y git
+# ========== НАСТРОЙКА ОКРУЖЕНИЯ ==========
+ENV DEBIAN_FRONTEND=noninteractive \
+    PYTHONUNBUFFERED=1 \
+    PIP_NO_CACHE_DIR=1 \
+    PIP_DISABLE_PIP_VERSION_CHECK=1 \
+    AM_I_IN_A_DOCKER_CONTAINER=Yes
 
+# ========== СЛОЙ 1: Системные пакеты (кэшируется) ==========
+RUN apt-get update && \
+    apt-get install -y --no-install-recommends \
+        git \
+        emacs \
+        ffmpeg \
+    && \
+    apt-get clean && \
+    rm -rf /var/lib/apt/lists/* /tmp/* /var/tmp/*
 
-# Clone the conf files into the docker container
-RUN git clone https://github.com/ilya12077/camimg.git
-	
-	
-RUN cp -a ./camimg/. /etc/camimg/
-RUN rm -r -f ./camimg/
+# ========== СЛОЙ 2: Клонирование репозитория ==========
+# Клонируем в отдельную папку для кэширования
+RUN git clone https://github.com/ilya12077/camimg.git /tmp/camimg
 
-RUN pip install -r /etc/camimg/requirements.txt
+# ========== СЛОЙ 3: Установка Python зависимостей (кэшируется) ==========
+# Копируем только requirements.txt из клонированного репозитория
+RUN pip install --no-cache-dir -r /tmp/camimg/requirements.txt
 
-ENV AM_I_IN_A_DOCKER_CONTAINER Yes
+# ========== СЛОЙ 4: Копирование кода приложения ==========
+RUN mkdir -p /etc/camimg && \
+    cp -a /tmp/camimg/. /etc/camimg/ && \
+    rm -rf /tmp/camimg
+
+# ========== ЗАПУСК ==========
 EXPOSE 8867/tcp
+
+WORKDIR /etc/camimg
+
 CMD ["python", "/etc/camimg/main.py"]

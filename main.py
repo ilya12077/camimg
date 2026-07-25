@@ -8,6 +8,7 @@ from waitress import serve
 from PIL import Image
 import io
 from concurrent.futures import ThreadPoolExecutor, as_completed
+import subprocess
 
 load_dotenv(find_dotenv())
 app = Flask(__name__)
@@ -24,46 +25,67 @@ session.headers.update({
 })
 
 
-def make_gif(image_names, duration=150):
+def make_mp4(image_names, fps=7):
     futures = [executor.submit(fetch_image_cached, name) for name in image_names]
+    if os.environ.get('AM_I_IN_A_DOCKER_CONTAINER', False):
+        FFMPEG = 'ffmpeg'
+    else:
+        FFMPEG = r'C:\Program Files (x86)\ffmpeg\ffmpeg.exe'
 
-    frames = []
+    process = subprocess.Popen(
+        [
+            FFMPEG,
+            "-hide_banner",
+            "-loglevel", "error",
 
-    for future in futures:
-        try:
-            image = future.result()
+            "-f", "image2pipe",
+            "-vcodec", "mjpeg",
+            "-framerate", str(fps),
+            "-i", "-",
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "28",
+            "-pix_fmt", "yuv420p",
 
-            image = compress_and_resize_bytes(
-                image,
-                max_width=320,
-                max_height=240,
-                quality=65
-            )
+            "-movflags", "frag_keyframe+empty_moov",
 
-            frames.append(Image.open(io.BytesIO(image)))
-
-        except requests.exceptions.HTTPError as e:
-            if e.response is not None and e.response.status_code == 404:
-                continue
-            raise
-
-    if not frames:
-        raise FileNotFoundError("No frames found")
-
-    output = io.BytesIO()
-
-    frames[0].save(
-        output,
-        format="GIF",
-        save_all=True,
-        append_images=frames[1:],
-        duration=duration,
-        loop=0,
-        optimize=False,
+            "-f", "mp4",
+            "-"
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
     )
 
-    output.seek(0)
-    return output.getvalue()
+    try:
+        frame_count = 0
+
+        for future in futures:
+            try:
+                jpeg = future.result()
+                process.stdin.write(jpeg)
+                frame_count += 1
+
+            except requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code == 404:
+                    continue
+                raise
+
+        process.stdin.close()
+
+        video, stderr = process.communicate()
+
+        if process.returncode != 0:
+            raise RuntimeError(stderr.decode())
+
+        if frame_count == 0:
+            raise FileNotFoundError("No frames found")
+
+        return video
+
+    finally:
+        if process.poll() is None:
+            process.kill()
 
 
 def compress_and_resize_bytes(image_bytes, max_width=800, max_height=600, quality=65):
@@ -109,13 +131,12 @@ def fetch_image_cached(image_name):
 
     response = session.get(
         external_url,
-        timeout=(3, 5),
+        timeout=5,
         verify=True
     )
     response.raise_for_status()
-    # compressed = compress_and_resize_bytes(response.content, max_width=800, max_height=600, quality=65)
 
-    return response.content
+    return compress_and_resize_bytes(response.content, max_width=800, max_height=600, quality=65)
 
 
 @app.route('/camimg')
@@ -131,7 +152,7 @@ def proxy_image():
 
     try:
         # Проверяем расширение файла
-        if not image_name.lower().endswith(('.jpg', '.jpeg', '.png')):
+        if not image_name.lower().endswith(('.jpg', '.jpeg')):
             return "Invalid image format", 400
 
         # Получаем изображение (из кэша или загружаем)
@@ -159,7 +180,7 @@ def clear_cache():
 
 
 @app.route('/camgif')
-def proxy_gif():
+def proxy_video():
     passw = request.args.get('pass')
     image_name = request.args.get('img')
 
@@ -185,12 +206,11 @@ def proxy_gif():
             for i in range(30)
         ]
 
-        gif = make_gif(image_names)
+        video = make_mp4(image_names)
 
         return Response(
-            gif,
-            content_type='image/gif',
-            status=200
+            video,
+            content_type="video/mp4"
         )
 
     except requests.exceptions.HTTPError as e:

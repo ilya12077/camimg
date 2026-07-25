@@ -7,7 +7,7 @@ from flask import Response
 from waitress import serve
 from PIL import Image
 import io
-from concurrent.futures import ThreadPoolExecutor, as_completed
+from concurrent.futures import ThreadPoolExecutor
 import subprocess
 
 load_dotenv(find_dotenv())
@@ -23,69 +23,6 @@ session.headers.update({
     "Authorization": f"Bearer {AUTH_TOKEN}",
     "User-Agent": "CamImgProxy/1.0"
 })
-
-
-def make_mp4(image_names, fps=7):
-    futures = [executor.submit(fetch_image_cached, name) for name in image_names]
-    if os.environ.get('AM_I_IN_A_DOCKER_CONTAINER', False):
-        FFMPEG = 'ffmpeg'
-    else:
-        FFMPEG = r'C:\Program Files (x86)\ffmpeg\ffmpeg.exe'
-
-    process = subprocess.Popen(
-        [
-            FFMPEG,
-            "-hide_banner",
-            "-loglevel", "error",
-
-            "-f", "image2pipe",
-            "-vcodec", "mjpeg",
-            "-framerate", str(fps),
-            "-i", "-",
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "28",
-            "-pix_fmt", "yuv420p",
-
-            "-movflags", "frag_keyframe+empty_moov",
-
-            "-f", "mp4",
-            "-"
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
-
-    try:
-        frame_count = 0
-
-        for future in futures:
-            try:
-                jpeg = future.result()
-                process.stdin.write(jpeg)
-                frame_count += 1
-
-            except requests.exceptions.HTTPError as e:
-                if e.response is not None and e.response.status_code == 404:
-                    continue
-                raise
-
-        process.stdin.close()
-
-        video, stderr = process.communicate()
-
-        if process.returncode != 0:
-            raise RuntimeError(stderr.decode())
-
-        if frame_count == 0:
-            raise FileNotFoundError("No frames found")
-
-        return video
-
-    finally:
-        if process.poll() is None:
-            process.kill()
 
 
 def compress_and_resize_bytes(image_bytes, max_width=800, max_height=600, quality=65):
@@ -158,12 +95,17 @@ def proxy_image():
         # Получаем изображение (из кэша или загружаем)
         content = fetch_image_cached(image_name)
         content = compress_and_resize_bytes(content, max_width=800, max_height=600, quality=65)
+        # ===== ОТДАЁМ КАК ГОТОВЫЙ ФАЙЛ =====
         return Response(
             content,
             content_type="image/jpeg",
+            headers={
+                'Content-Disposition': f'inline; filename="{image_name.split("/")[-1]}"',
+                'Content-Length': str(len(content)),
+                'Accept-Ranges': 'bytes'  # Поддержка докачки
+            },
             status=200
         )
-
     except requests.exceptions.HTTPError as e:
         if e.response.status_code == 404:
             return "Image not found", 404
@@ -172,11 +114,75 @@ def proxy_image():
         return f"Internal error: {str(e)}", 500
 
 
-@app.route('/camimg/clear_cache')
-def clear_cache():
-    """Очистка кэша (опционально)"""
-    fetch_image_cached.cache_clear()
-    return "Cache cleared", 200
+def make_mp4(image_names, fps=7):
+    futures = [executor.submit(fetch_image_cached, name) for name in image_names]
+
+    if os.environ.get('AM_I_IN_A_DOCKER_CONTAINER', False):
+        FFMPEG = "ffmpeg"
+    else:
+        FFMPEG = r"C:\Program Files (x86)\ffmpeg\ffmpeg.exe"
+
+    process = subprocess.Popen(
+        [
+            FFMPEG,
+            "-hide_banner",
+            "-loglevel", "error",
+
+            "-f", "image2pipe",
+            "-vcodec", "mjpeg",
+            "-framerate", str(fps),
+            "-i", "-",
+
+            "-c:v", "libx264",
+            "-preset", "ultrafast",
+            "-crf", "28",
+            "-pix_fmt", "yuv420p",
+
+            "-movflags", "frag_keyframe+empty_moov",
+
+            "-f", "mp4",
+            "-"
+        ],
+        stdin=subprocess.PIPE,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.PIPE,
+    )
+
+    try:
+        frame_count = 0
+
+        for future in futures:
+            jpeg = future.result()
+
+            process.stdin.write(jpeg)
+            process.stdin.flush()
+
+            frame_count += 1
+
+        process.stdin.close()
+
+        video = process.stdout.read()
+        error = process.stderr.read()
+
+        process.wait()
+
+        if process.returncode != 0:
+            raise RuntimeError(error.decode(errors="ignore"))
+
+        if frame_count == 0:
+            raise FileNotFoundError("No frames found")
+
+        return video
+
+    except BrokenPipeError:
+        error = process.stderr.read()
+        raise RuntimeError(
+            "ffmpeg stopped: " + error.decode(errors="ignore")
+        )
+
+    finally:
+        if process.poll() is None:
+            process.kill()
 
 
 @app.route('/camgif')
@@ -205,12 +211,17 @@ def proxy_video():
             f"{folder}/{prefix}_{i}.jpg"
             for i in range(30)
         ]
+        # ===== ГЕНЕРИРУЕМ ВИДЕО В ПАМЯТИ =====
+        video_data = make_mp4(image_names, fps=7)
 
-        video = make_mp4(image_names)
-
+        # ===== ОТДАЁМ КАК ГОТОВЫЙ ФАЙЛ =====
         return Response(
-            video,
-            content_type="video/mp4"
+            video_data,
+            content_type="video/mp4",
+            headers={
+                'Content-Disposition': 'inline; filename="video.mp4"',
+                'Content-Length': str(len(video_data))
+            }
         )
 
     except requests.exceptions.HTTPError as e:

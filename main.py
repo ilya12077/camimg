@@ -94,10 +94,9 @@ def make_mp4(image_names, fps=1):
 
                 "-f", "image2pipe",
                 "-vcodec", "mjpeg",
-                "-framerate", str(fps),
                 "-i", "-",
 
-                "-vf", "scale=640:480:force_original_aspect_ratio=decrease",
+                "-vf", "setpts=8.0*PTS",  # <-- Замедление через фильтры
 
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
@@ -106,6 +105,7 @@ def make_mp4(image_names, fps=1):
                 "-pix_fmt", "yuv420p",
 
                 "-movflags", "+faststart",
+
 
                 "-y",
                 tmp_path,

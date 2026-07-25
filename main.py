@@ -76,7 +76,7 @@ def proxy_image():
         return f"Internal error: {str(e)}", 500
 
 
-def make_mp4(image_names, fps=7):
+def make_mp4(image_names, fps=1):
     futures = [executor.submit(fetch_image_cached, name) for name in image_names]
 
     FFMPEG = "ffmpeg" if os.environ.get('AM_I_IN_A_DOCKER_CONTAINER', False) else r"C:\Program Files (x86)\ffmpeg\ffmpeg.exe"

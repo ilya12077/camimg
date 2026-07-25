@@ -96,11 +96,11 @@ def make_mp4(image_names, fps=1):
                 "-vcodec", "mjpeg",
                 "-i", "-",
 
-                "-vf", "setpts=8.0*PTS",  # <-- Замедление через фильтры
+                "-vf", "setpts=10.0*PTS,scale=800:600:force_original_aspect_ratio=decrease",  # <-- Замедление через фильтры
 
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
-                "-crf", "28",
+                "-crf", "32",
                 "-tune", "fastdecode",
                 "-pix_fmt", "yuv420p",
 

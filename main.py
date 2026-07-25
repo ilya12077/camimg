@@ -5,10 +5,9 @@ from dotenv import find_dotenv, load_dotenv
 from flask import Flask, request
 from flask import Response
 from waitress import serve
-from PIL import Image
-import io
 from concurrent.futures import ThreadPoolExecutor
 import subprocess
+import tempfile
 
 load_dotenv(find_dotenv())
 app = Flask(__name__)
@@ -25,43 +24,7 @@ session.headers.update({
 })
 
 
-def compress_and_resize_bytes(image_bytes, max_width=800, max_height=600, quality=65):
-    # Загружаем изображение
-    img = Image.open(io.BytesIO(image_bytes))
-
-    # Конвертируем в RGB
-    if img.mode in ('RGBA', 'LA', 'P'):
-        img = img.convert('RGB')
-
-    # Уменьшаем разрешение, если заданы параметры
-    if max_width or max_height:
-        original_width, original_height = img.size
-
-        # Вычисляем новые размеры с сохранением пропорций
-        new_width = original_width
-        new_height = original_height
-
-        if max_width and original_width > max_width:
-            ratio = max_width / original_width
-            new_width = max_width
-            new_height = int(original_height * ratio)
-
-        if max_height and new_height > max_height:
-            ratio = max_height / new_height
-            new_height = max_height
-            new_width = int(new_width * ratio)
-
-        # Применяем изменение размера (resample - алгоритм пересчёта пикселей)
-        img = img.resize((new_width, new_height), Image.Resampling.LANCZOS)
-
-    # Сохраняем со сжатием
-    output_buffer = io.BytesIO()
-    img.save(output_buffer, format='JPEG', quality=quality, optimize=True)
-
-    return output_buffer.getvalue()
-
-
-@lru_cache(maxsize=256)  # Кэш на 100 изображений
+@lru_cache(maxsize=300)  # Кэш на 100 изображений
 def fetch_image_cached(image_name):
     """Получение изображения с кэшированием"""
     external_url = f"{EXTERNAL_SERVER}/{image_name}"
@@ -73,7 +36,7 @@ def fetch_image_cached(image_name):
     )
     response.raise_for_status()
 
-    return compress_and_resize_bytes(response.content, max_width=800, max_height=600, quality=65)
+    return response.content
 
 
 @app.route('/camimg')
@@ -94,7 +57,6 @@ def proxy_image():
 
         # Получаем изображение (из кэша или загружаем)
         content = fetch_image_cached(image_name)
-        content = compress_and_resize_bytes(content, max_width=800, max_height=600, quality=65)
         # ===== ОТДАЁМ КАК ГОТОВЫЙ ФАЙЛ =====
         return Response(
             content,
@@ -117,72 +79,66 @@ def proxy_image():
 def make_mp4(image_names, fps=7):
     futures = [executor.submit(fetch_image_cached, name) for name in image_names]
 
-    if os.environ.get('AM_I_IN_A_DOCKER_CONTAINER', False):
-        FFMPEG = "ffmpeg"
-    else:
-        FFMPEG = r"C:\Program Files (x86)\ffmpeg\ffmpeg.exe"
+    FFMPEG = "ffmpeg" if os.environ.get('AM_I_IN_A_DOCKER_CONTAINER', False) else r"C:\Program Files (x86)\ffmpeg\ffmpeg.exe"
 
-    process = subprocess.Popen(
-        [
-            FFMPEG,
-            "-hide_banner",
-            "-loglevel", "error",
-
-            "-f", "image2pipe",
-            "-vcodec", "mjpeg",
-            "-framerate", str(fps),
-            "-i", "-",
-
-            "-c:v", "libx264",
-            "-preset", "ultrafast",
-            "-crf", "28",
-            "-pix_fmt", "yuv420p",
-
-            "-movflags", "frag_keyframe+empty_moov",
-
-            "-f", "mp4",
-            "-"
-        ],
-        stdin=subprocess.PIPE,
-        stdout=subprocess.PIPE,
-        stderr=subprocess.PIPE,
-    )
+    # Создаём временный файл
+    with tempfile.NamedTemporaryFile(delete=False, suffix='.mp4') as tmp_file:
+        tmp_path = tmp_file.name
 
     try:
-        frame_count = 0
+        process = subprocess.Popen(
+            [
+                FFMPEG,
+                "-hide_banner",
+                "-loglevel", "error",
+
+                "-f", "image2pipe",
+                "-vcodec", "mjpeg",
+                "-framerate", str(fps),
+                "-i", "-",
+
+                "-vf", "scale=640:480:force_original_aspect_ratio=decrease",
+
+                "-c:v", "libx264",
+                "-preset", "ultrafast",
+                "-crf", "28",
+                "-tune", "fastdecode",
+                "-pix_fmt", "yuv420p",
+
+                "-movflags", "+faststart",
+
+                "-y",
+                tmp_path,
+            ],
+            stdin=subprocess.PIPE,
+            stdout=subprocess.DEVNULL,
+            stderr=subprocess.PIPE,
+        )
 
         for future in futures:
-            jpeg = future.result()
-
-            process.stdin.write(jpeg)
-            process.stdin.flush()
-
-            frame_count += 1
-
+            try:
+                process.stdin.write(future.result())
+            except requests.exceptions.HTTPError as e:
+                if e.response is not None and e.response.status_code == 404:
+                    continue
+                raise
         process.stdin.close()
-
-        video = process.stdout.read()
-        error = process.stderr.read()
-
         process.wait()
 
         if process.returncode != 0:
+            error = process.stderr.read()
             raise RuntimeError(error.decode(errors="ignore"))
 
-        if frame_count == 0:
-            raise FileNotFoundError("No frames found")
-
-        return video
-
-    except BrokenPipeError:
-        error = process.stderr.read()
-        raise RuntimeError(
-            "ffmpeg stopped: " + error.decode(errors="ignore")
-        )
-
+        # Читаем файл
+        with open(tmp_path, 'rb') as f:
+            video_data = f.read()
     finally:
-        if process.poll() is None:
-            process.kill()
+        if os.path.exists(tmp_path):
+            try:
+                os.unlink(tmp_path)
+            except OSError:
+                pass
+    return video_data
 
 
 @app.route('/camgif')

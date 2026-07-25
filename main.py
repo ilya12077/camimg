@@ -76,7 +76,7 @@ def proxy_image():
         return f"Internal error: {str(e)}", 500
 
 
-def make_mp4(image_names, fps=1):
+def make_mp4(image_names):
     futures = [executor.submit(fetch_image_cached, name) for name in image_names]
 
     FFMPEG = "ffmpeg" if os.environ.get('AM_I_IN_A_DOCKER_CONTAINER', False) else r"C:\Program Files (x86)\ffmpeg\ffmpeg.exe"
@@ -96,7 +96,7 @@ def make_mp4(image_names, fps=1):
                 "-vcodec", "mjpeg",
                 "-i", "-",
 
-                "-vf", "setpts=10.0*PTS,scale=800:600:force_original_aspect_ratio=decrease",  # <-- Замедление через фильтры
+                "-vf", "setpts=5.0*PTS,scale=800:600:force_original_aspect_ratio=decrease",  # <-- Замедление через фильтры
 
                 "-c:v", "libx264",
                 "-preset", "ultrafast",
@@ -168,7 +168,7 @@ def proxy_video():
             for i in range(30)
         ]
         # ===== ГЕНЕРИРУЕМ ВИДЕО В ПАМЯТИ =====
-        video_data = make_mp4(image_names, fps=7)
+        video_data = make_mp4(image_names)
 
         # ===== ОТДАЁМ КАК ГОТОВЫЙ ФАЙЛ =====
         return Response(
